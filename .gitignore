@@ -18,6 +18,7 @@ ENV/
 
 # 日志
 *.log
+*.json
 
 # 系统文件
 .DS_Store

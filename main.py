@@ -11,6 +11,8 @@ from urllib.parse import urlencode
 
 import websockets
 from dotenv import load_dotenv
+import aiohttp
+from webhook import send_message_async
 
 # 加载环境变量
 load_dotenv()
@@ -40,7 +42,30 @@ class BinanceAnnouncementMonitor:
         # 设置更详细的日志级别用于调试
         if os.getenv('DEBUG'):
             logger.setLevel(logging.DEBUG)
-
+        
+        # 配置文件日志
+        self.setup_logging()
+        self.session = None  # aiohttp session
+        
+    def setup_logging(self):
+        """配置日志处理"""
+        # 创建logs目录
+        if not os.path.exists('logs'):
+            os.makedirs('logs')
+            
+        # 获取当前时间作为文件名
+        current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_file = f'logs/binance_announcement_{current_time}.log'
+        
+        # 创建文件处理器
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        ))
+        
+        # 添加到logger
+        logger.addHandler(file_handler)
+        
     def generate_signature(self, params: Dict[str, Any]) -> str:
         """生成签名"""
         # 确保所有值都转换为字符串
@@ -95,6 +120,24 @@ class BinanceAnnouncementMonitor:
                 logger.error(f"发送PING消息时出错: {e}")
                 break
 
+    def parse_announcement(self, data_str: str) -> Dict:
+        """解析公告数据"""
+        try:
+            data = json.loads(data_str)
+            return {
+                'catalogId': data.get('catalogId'),
+                'catalogName': data.get('catalogName'),
+                'publishDate': datetime.fromtimestamp(
+                    int(data.get('publishDate', 0)) / 1000
+                ).strftime('%Y-%m-%d %H:%M:%S'),
+                'title': data.get('title'),
+                'body': data.get('body'),
+                'disclaimer': data.get('disclaimer')
+            }
+        except Exception as e:
+            logger.error(f"解析公告数据失败: {e}")
+            return {}
+
     async def handle_message(self, message: Dict[str, Any]) -> None:
         """处理接收到的消息"""
         try:
@@ -102,29 +145,115 @@ class BinanceAnnouncementMonitor:
             if message.get('type') == 'COMMAND':
                 logger.info(f"收到命令响应: {message}")
                 return
-                
+            
             # 处理公告消息
-            data = message.get('data', {})
-            announcement_id = data.get('id')
-            
-            # 避免重复处理相同的公告
-            if announcement_id == self.last_announcement_id:
-                return
-            
-            self.last_announcement_id = announcement_id
-            
-            # 格式化时间
-            timestamp = data.get('publishDate', 0)
-            publish_date = datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S')
-            
-            # 打印公告信息
-            logger.info(f"新公告: {data.get('title')}")
-            logger.info(f"发布时间: {publish_date}")
-            logger.info(f"链接: {data.get('url')}")
-            logger.info("-" * 50)
-            
+            if message.get('type') == 'DATA' and message.get('topic') == 'com_announcement_en':
+                data_str = message.get('data', '{}')
+                announcement = self.parse_announcement(data_str)
+                
+                if not announcement:
+                    return
+                
+                # 避免重复处理相同的公告
+                announcement_id = announcement.get('catalogId')
+                if announcement_id == self.last_announcement_id:
+                    return
+                
+                self.last_announcement_id = announcement_id
+                
+                # 打印公告信息
+                logger.info("收到新公告:")
+                logger.info(f"分类: {announcement.get('catalogName')}")
+                logger.info(f"标题: {announcement.get('title')}")
+                logger.info(f"发布时间: {announcement.get('publishDate')}")
+                logger.info(f"内容: {announcement.get('body')}")
+                logger.info(f"免责声明: {announcement.get('disclaimer')}")
+                logger.info("-" * 50)
+                
+                # 保存公告到文件
+                self.save_announcement(announcement)
+                
+                # 发送到Webhook
+                await self.send_to_webhook(announcement)
+                
         except Exception as e:
             logger.error(f"处理消息时出错: {e}")
+
+    def save_announcement(self, announcement: Dict) -> None:
+        """保存公告到JSON文件"""
+        try:
+            # 创建json目录
+            json_dir = 'json'
+            if not os.path.exists(json_dir):
+                os.makedirs(json_dir)
+            
+            # 使用时间戳和标题创建文件名
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            title = announcement.get('title', 'untitled')
+            
+            # 移除文件名中的非法字符
+            title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
+            
+            # 按日期创建子目录
+            date_dir = os.path.join(json_dir, datetime.now().strftime('%Y%m%d'))
+            if not os.path.exists(date_dir):
+                os.makedirs(date_dir)
+            
+            # 构建完整的文件路径
+            filename = f'{timestamp}_{title[:50]}.json'
+            filepath = os.path.join(date_dir, filename)
+            
+            # 保存为JSON文件，使用缩进格式化
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(announcement, f, ensure_ascii=False, indent=2)
+                
+            logger.info(f"公告已保存到文件: {filepath}")
+            
+        except Exception as e:
+            logger.error(f"保存公告到文件时出错: {e}")
+
+    async def send_to_webhook(self, announcement: Dict) -> None:
+        """发送公告到Webhook"""
+        try:
+            if not self.session:
+                await self.setup_session()
+            
+            # 格式化消息内容
+            title = announcement.get('title', 'N/A')
+            body = announcement.get('body', 'N/A')
+            
+            # 处理正文内容，移除多余的换行和空格
+            body = ' '.join(body.split('\n')[:3])  # 只取前三行
+            if len(body) > 500:
+                body = body[:497] + "..."
+            
+            content = (
+                f"📢 币安新公告\n"
+                f"━━━━━━━━━━\n"
+                f"📌 分类: {announcement.get('catalogName', 'N/A')}\n"
+                f"📑 标题: {title}\n"
+                f"⏰ 时间: {announcement.get('publishDate', 'N/A')}\n"
+                f"📄 内容: {body}\n"
+                f"━━━━━━━━━━"
+            )
+            
+            # 确保content是字符串类型
+            content = str(content)
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            
+            # 发送消息
+            success = await send_message_async(content)
+            if success:
+                logger.info("Webhook消息发送成功")
+            else:
+                logger.error("Webhook消息发送失败")
+            
+        except Exception as e:
+            logger.error(f"发送Webhook消息失败: {e}")
 
     async def subscribe(self, websocket) -> None:
         """订阅公告频道"""
@@ -136,50 +265,73 @@ class BinanceAnnouncementMonitor:
         response = await websocket.recv()
         logger.info(f"订阅响应: {response}")
 
+    async def setup_session(self):
+        """设置aiohttp session"""
+        if self.session is None:
+            self.session = aiohttp.ClientSession()
+    
+    async def cleanup_session(self):
+        """清理aiohttp session"""
+        if self.session:
+            await self.session.close()
+            self.session = None
+
     async def connect_and_listen(self) -> None:
         """建立连接并监听消息"""
-        while True:
-            try:
-                # 准备连接URL和headers
-                url = self.get_connection_url()
-                headers = {"X-MBX-APIKEY": self.api_key}
-                
-                async with websockets.connect(
-                    url, 
-                    extra_headers=headers,
-                    ping_interval=None,  # 禁用自动ping，我们使用自己的ping逻辑
-                    ping_timeout=self.ping_timeout
-                ) as websocket:
-                    logger.info("已连接到Binance WebSocket API")
-                    
-                    # 启动PING任务
-                    ping_task = asyncio.create_task(self.ping_server(websocket))
-                    
-                    # 订阅频道
-                    await self.subscribe(websocket)
-                    
-                    try:
-                        while True:
-                            message = await websocket.recv()
-                            await self.handle_message(json.loads(message))
-                    except Exception as e:
-                        logger.error(f"接收消息时出错: {e}")
-                        ping_task.cancel()
-                        
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("WebSocket连接已关闭，准备重连...")
-            except Exception as e:
-                logger.error(f"发生错误: {e}")
+        try:
+            # 设置aiohttp session
+            await self.setup_session()
             
-            logger.info(f"{self.reconnect_delay}秒后尝试重连...")
-            await asyncio.sleep(self.reconnect_delay)
+            while True:
+                try:
+                    # 准备连接URL和headers
+                    url = self.get_connection_url()
+                    headers = {"X-MBX-APIKEY": self.api_key}
+                    
+                    async with websockets.connect(
+                        url, 
+                        extra_headers=headers,
+                        ping_interval=None,
+                        ping_timeout=self.ping_timeout
+                    ) as websocket:
+                        logger.info("已连接到Binance WebSocket API")
+                        
+                        # 启动PING任务
+                        ping_task = asyncio.create_task(self.ping_server(websocket))
+                        
+                        # 订阅频道
+                        await self.subscribe(websocket)
+                        
+                        try:
+                            while True:
+                                message = await websocket.recv()
+                                await self.handle_message(json.loads(message))
+                        except Exception as e:
+                            logger.error(f"接收消息时出错: {e}")
+                            if ping_task:
+                                ping_task.cancel()
+                                
+                except websockets.exceptions.ConnectionClosed:
+                    logger.warning("WebSocket连接已关闭，准备重连...")
+                except Exception as e:
+                    logger.error(f"发生错误: {e}")
+                
+                logger.info(f"{self.reconnect_delay}秒后尝试重连...")
+                await asyncio.sleep(self.reconnect_delay)
+                
+        finally:
+            # 清理session
+            await self.cleanup_session()
 
     def run(self) -> None:
         """启动监控"""
         try:
+            # 使用asyncio运行
             asyncio.run(self.connect_and_listen())
         except KeyboardInterrupt:
             logger.info("程序已停止")
+        except Exception as e:
+            logger.error(f"程序运行出错: {e}")
 
 if __name__ == "__main__":
     monitor = BinanceAnnouncementMonitor()
