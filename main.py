@@ -35,12 +35,21 @@ class BinanceAnnouncementMonitor:
         self.last_announcement_id = None
         self.ping_interval = 30  # PING间隔（秒）
         self.recv_window = 30000  # 接收窗口（毫秒）
+        self.ping_timeout = 60  # PING超时时间（秒）
+        
+        # 设置更详细的日志级别用于调试
+        if os.getenv('DEBUG'):
+            logger.setLevel(logging.DEBUG)
 
     def generate_signature(self, params: Dict[str, Any]) -> str:
         """生成签名"""
-        # 按字母顺序排序参数
-        sorted_params = sorted(params.items())
-        query_string = '&'.join([f"{k}={v}" for k, v in sorted_params])
+        # 确保所有值都转换为字符串
+        params = {k: str(v) for k, v in params.items()}
+        
+        # 按字母顺序排序并生成查询字符串
+        query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
+        
+        logger.debug(f"签名前的字符串: {query_string}")
         
         # 使用HMAC SHA256生成签名
         signature = hmac.new(
@@ -49,30 +58,37 @@ class BinanceAnnouncementMonitor:
             hashlib.sha256
         ).hexdigest()
         
+        logger.debug(f"生成的签名: {signature}")
         return signature
 
     def get_connection_url(self) -> str:
         """生成带签名的连接URL"""
-        # 准备参数
+        # 准备参数 - 注意顺序并确保值的类型正确
         params = {
             'random': uuid.uuid4().hex[:32],
-            'topic': 'announcement',
-            'recvWindow': self.recv_window,
-            'timestamp': int(datetime.now().timestamp() * 1000)
+            'recvWindow': str(self.recv_window),
+            'timestamp': str(int(datetime.now().timestamp() * 1000)),
+            'topic': 'com_announcement_en'  # 使用正确的topic
         }
         
         # 生成签名
         signature = self.generate_signature(params)
+        
+        # 添加签名到参数中
         params['signature'] = signature
         
-        # 构建URL
-        url = f"{self.base_url}?{urlencode(params)}"
+        # 构建URL - 使用urlencode确保正确的URL编码
+        query_string = urlencode(params)
+        url = f"{self.base_url}?{query_string}"
+        
+        logger.debug(f"最终URL: {url}")
         return url
 
     async def ping_server(self, websocket) -> None:
         """定期发送PING消息"""
         while True:
             try:
+                # 发送空payload的PING
                 await websocket.ping()
                 await asyncio.sleep(self.ping_interval)
             except Exception as e:
@@ -114,7 +130,7 @@ class BinanceAnnouncementMonitor:
         """订阅公告频道"""
         subscribe_message = {
             "command": "SUBSCRIBE",
-            "value": "announcement"
+            "value": "com_announcement_en"  # 使用正确的topic
         }
         await websocket.send(json.dumps(subscribe_message))
         response = await websocket.recv()
@@ -128,7 +144,12 @@ class BinanceAnnouncementMonitor:
                 url = self.get_connection_url()
                 headers = {"X-MBX-APIKEY": self.api_key}
                 
-                async with websockets.connect(url, extra_headers=headers) as websocket:
+                async with websockets.connect(
+                    url, 
+                    extra_headers=headers,
+                    ping_interval=None,  # 禁用自动ping，我们使用自己的ping逻辑
+                    ping_timeout=self.ping_timeout
+                ) as websocket:
                     logger.info("已连接到Binance WebSocket API")
                     
                     # 启动PING任务
