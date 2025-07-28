@@ -1,0 +1,18 @@
+version: '3.8'
+services:
+  biance-wss-connection:
+    build: 
+      context: .
+      args:
+        - HTTP_PROXY=
+        - HTTPS_PROXY=
+    container_name: biance-wss-connection
+    volumes:
+      - type: bind
+        source: .
+        target: /app
+    environment:
+      - TZ=Asia/Shanghai
+      - ENV=prod
+    shm_size: '0.5gb'
+    restart: always
