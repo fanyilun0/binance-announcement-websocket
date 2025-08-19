@@ -13,6 +13,7 @@ import websockets
 from dotenv import load_dotenv
 import aiohttp
 from webhook import send_message_async
+from ntfy import send_ntfy_notification
 
 # 加载环境变量
 load_dotenv()
@@ -124,6 +125,7 @@ class BinanceAnnouncementMonitor:
         """解析公告数据"""
         try:
             data = json.loads(data_str)
+            logger.debug(data)
             return {
                 'catalogId': data.get('catalogId'),
                 'catalogName': data.get('catalogName'),
@@ -246,11 +248,7 @@ class BinanceAnnouncementMonitor:
             }
             
             # 发送消息
-            success = await send_message_async(content)
-            if success:
-                logger.info("Webhook消息发送成功")
-            else:
-                logger.error("Webhook消息发送失败")
+            await send_message_async(content)
             
         except Exception as e:
             logger.error(f"发送Webhook消息失败: {e}")
@@ -334,5 +332,11 @@ class BinanceAnnouncementMonitor:
             logger.error(f"程序运行出错: {e}")
 
 if __name__ == "__main__":
+    asyncio.run(send_ntfy_notification("程序启动", "BinanceAnnouncementMonitor 程序启动成功"))
+
     monitor = BinanceAnnouncementMonitor()
-    monitor.run() 
+    try:
+        monitor.run() 
+    except Exception as e:
+        logger.error(f"程序运行出错: {e}")
+        asyncio.run(send_ntfy_notification("程序运行出错", f"BinanceAnnouncementMonitor 程序运行出错: {e}"))
