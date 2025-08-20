@@ -224,28 +224,13 @@ class BinanceAnnouncementMonitor:
             title = announcement.get('title', 'N/A')
             body = announcement.get('body', 'N/A')
             
-            # 处理正文内容，移除多余的换行和空格
-            body = ' '.join(body.split('\n')[:3])  # 只取前三行
-            if len(body) > 500:
-                body = body[:497] + "..."
-            
             content = (
                 f"📢 币安新公告\n"
-                f"━━━━━━━━━━\n"
                 f"📌 分类: {announcement.get('catalogName', 'N/A')}\n"
                 f"📑 标题: {title}\n"
                 f"⏰ 时间: {announcement.get('publishDate', 'N/A')}\n"
                 f"📄 内容: {body}\n"
-                f"━━━━━━━━━━"
             )
-            
-            # 确保content是字符串类型
-            content = str(content)
-            
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
             
             # 发送消息
             await send_message_async(content)
