@@ -7,7 +7,7 @@ WORKDIR /app
 
 # 安装Python依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt 
+RUN pip install --no-cache-dir -r requirements.txt watchdog[watchmedo]
 
-# 运行程序
+# 在开发环境中，容器启动后会被docker-compose的command覆盖
 CMD ["python3", "-u", "main.py"]

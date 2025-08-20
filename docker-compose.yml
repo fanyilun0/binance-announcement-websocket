@@ -8,11 +8,16 @@ services:
         - HTTPS_PROXY=
     container_name: biance-wss-connection
     volumes:
-      - type: bind
-        source: .
-        target: /app
+      - .:/app:cached
+      - /app/__pycache__
+      - /app/.pytest_cache
+      - /app/logs
+      - /app/json
     environment:
       - TZ=Asia/Shanghai
-      - ENV=prod
+      - ENV=dev
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
     shm_size: '0.5gb'
-    restart: always
+    restart: "no"
+    command: python -m watchdog.watchmedo auto-restart --directory=/app --pattern=*.py --recursive -- python main.py

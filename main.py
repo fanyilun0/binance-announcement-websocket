@@ -121,11 +121,35 @@ class BinanceAnnouncementMonitor:
                 logger.error(f"发送PING消息时出错: {e}")
                 break
 
+    def clean_announcement_body(self, body: str) -> str:
+        """清理公告内容中的固定开场白和免责声明"""
+        if not body:
+            return ""
+            
+        # 定义需要移除的固定文本
+        opening_text = "This is a general announcement."
+        disclaimer_text = "Products and services referred to here may not be available in your region."
+        
+        # 移除开场白
+        if body.startswith(opening_text):
+            body = body[len(opening_text):].strip()
+            
+        # 移除免责声明
+        if body.endswith(disclaimer_text):
+            body = body[:-len(disclaimer_text)].strip()
+            
+        return body
+
     def parse_announcement(self, data_str: str) -> Dict:
         """解析公告数据"""
         try:
+            logger.debug('data_str: ' + data_str + '\n')
             data = json.loads(data_str)
-            logger.debug(data)
+            logger.debug(' data: ' + str(data) + '\n')
+            
+            # 清理公告内容
+            body = self.clean_announcement_body(data.get('body', ''))
+            
             return {
                 'catalogId': data.get('catalogId'),
                 'catalogName': data.get('catalogName'),
@@ -133,8 +157,7 @@ class BinanceAnnouncementMonitor:
                     int(data.get('publishDate', 0)) / 1000
                 ).strftime('%Y-%m-%d %H:%M:%S'),
                 'title': data.get('title'),
-                'body': data.get('body'),
-                'disclaimer': data.get('disclaimer')
+                'body': body
             }
         except Exception as e:
             logger.error(f"解析公告数据失败: {e}")
