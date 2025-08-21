@@ -18,6 +18,10 @@ services:
       - ENV=dev
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
+      # 使用 host.docker.internal 访问宿主机
+      - NTFY_URL=http://host.docker.internal:8000/ntfy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     shm_size: '0.5gb'
     restart: "no"
     command: python -m watchdog.watchmedo auto-restart --directory=/app --pattern=*.py --recursive -- python main.py

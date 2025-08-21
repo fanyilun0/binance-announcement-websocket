@@ -122,22 +122,16 @@ class BinanceAnnouncementMonitor:
                 break
 
     def clean_announcement_body(self, body: str) -> str:
-        """清理公告内容中的固定开场白和免责声明"""
+        """清理公告内容中的固定开场白"""
         if not body:
             return ""
             
         # 定义需要移除的固定文本
         opening_text = "This is a general announcement."
-        disclaimer_text = "Products and services referred to here may not be available in your region."
+        opening_text_2 = "Products and services referred to here may not be available in your region."
         
-        # 移除开场白
-        if body.startswith(opening_text):
-            body = body[len(opening_text):].strip()
-            
-        # 移除免责声明
-        if body.endswith(disclaimer_text):
-            body = body[:-len(disclaimer_text)].strip()
-            
+        body = body.replace(opening_text, '').replace(opening_text_2, '')
+
         return body
 
     def parse_announcement(self, data_str: str) -> Dict:
@@ -192,7 +186,6 @@ class BinanceAnnouncementMonitor:
                 logger.info(f"标题: {announcement.get('title')}")
                 logger.info(f"发布时间: {announcement.get('publishDate')}")
                 logger.info(f"内容: {announcement.get('body')}")
-                logger.info(f"免责声明: {announcement.get('disclaimer')}")
                 logger.info("-" * 50)
                 
                 # 保存公告到文件
@@ -247,6 +240,8 @@ class BinanceAnnouncementMonitor:
             title = announcement.get('title', 'N/A')
             body = announcement.get('body', 'N/A')
             
+            body = self.clean_announcement_body(body)
+
             content = (
                 f"📢 币安新公告\n"
                 f"📌 分类: {announcement.get('catalogName', 'N/A')}\n"
@@ -301,6 +296,12 @@ class BinanceAnnouncementMonitor:
                         ping_timeout=self.ping_timeout
                     ) as websocket:
                         logger.info("已连接到Binance WebSocket API")
+                        # 添加连接成功通知
+                        await send_ntfy_notification(
+                            "WebSocket连接成功",
+                            "已成功连接到Binance WebSocket API",
+                            tags=["success", "websocket"]
+                        )
                         
                         # 启动PING任务
                         ping_task = asyncio.create_task(self.ping_server(websocket))
@@ -319,8 +320,22 @@ class BinanceAnnouncementMonitor:
                                 
                 except websockets.exceptions.ConnectionClosed:
                     logger.warning("WebSocket连接已关闭，准备重连...")
+                    # 添加连接断开通知
+                    await send_ntfy_notification(
+                        "WebSocket连接断开",
+                        "WebSocket连接已断开，准备重新连接...",
+                        priority="high",
+                        tags=["warning", "websocket"]
+                    )
                 except Exception as e:
                     logger.error(f"发生错误: {e}")
+                    # 添加错误通知
+                    await send_ntfy_notification(
+                        "WebSocket连接错误",
+                        f"发生错误: {e}",
+                        priority="high",
+                        tags=["error", "websocket"]
+                    )
                 
                 logger.info(f"{self.reconnect_delay}秒后尝试重连...")
                 await asyncio.sleep(self.reconnect_delay)
@@ -336,8 +351,21 @@ class BinanceAnnouncementMonitor:
             asyncio.run(self.connect_and_listen())
         except KeyboardInterrupt:
             logger.info("程序已停止")
+            # 添加正常终止通知
+            asyncio.run(send_ntfy_notification(
+                "程序已停止",
+                "BinanceAnnouncementMonitor 程序已正常停止",
+                tags=["info", "shutdown"]
+            ))
         except Exception as e:
             logger.error(f"程序运行出错: {e}")
+            # 添加异常终止通知
+            asyncio.run(send_ntfy_notification(
+                "程序异常终止",
+                f"BinanceAnnouncementMonitor 程序异常终止: {e}",
+                priority="urgent",
+                tags=["error", "shutdown"]
+            ))
 
 if __name__ == "__main__":
     asyncio.run(send_ntfy_notification("程序启动", "BinanceAnnouncementMonitor 程序启动成功"))
