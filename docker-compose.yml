@@ -4,8 +4,8 @@ services:
     build: 
       context: .
       args:
-        - HTTP_PROXY=
-        - HTTPS_PROXY=
+        - HTTP_PROXY=http://host.docker.internal:7890
+        - HTTPS_PROXY=http://host.docker.internal:7890
     container_name: biance-wss-connection
     volumes:
       - .:/app:cached
@@ -18,6 +18,8 @@ services:
       - ENV=dev
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
+      - HTTP_PROXY=http://host.docker.internal:7890
+      - HTTPS_PROXY=http://host.docker.internal:7890
     extra_hosts:
       - "host.docker.internal:host-gateway"
     shm_size: '0.5gb'

@@ -13,6 +13,7 @@ import websockets
 from dotenv import load_dotenv
 import aiohttp
 from webhook import send_message_async
+from config import HTTP_PROXY
 
 # 加载环境变量
 load_dotenv()
@@ -120,15 +121,8 @@ class BinanceAnnouncementMonitor:
         return url
 
     async def ping_server(self, websocket) -> None:
-        """定期发送PING消息"""
-        while True:
-            try:
-                # 发送空payload的PING
-                await websocket.ping()
-                await asyncio.sleep(self.ping_interval)
-            except Exception as e:
-                logger.error(f"发送PING消息时出错: {e}")
-                break
+        """定期发送PING消息（已废弃，使用aiohttp内置heartbeat）"""
+        pass
 
     def clean_announcement_body(self, body: str) -> str:
         """清理公告内容中的固定开场白"""
@@ -194,7 +188,7 @@ class BinanceAnnouncementMonitor:
                 logger.info(f"分类: {announcement.get('catalogName')}")
                 logger.info(f"标题: {announcement.get('title')}")
                 logger.info(f"发布时间: {announcement.get('publishDate')}")
-                logger.info(f"内容: {announcement.get('body')}")
+                logger.info(f"内容: {announcement.get('body').slice(0, 1000)}")
                 logger.info("-" * 50)
                 
                 # 保存公告到文件
@@ -266,7 +260,7 @@ class BinanceAnnouncementMonitor:
             logger.error(f"发送Webhook消息失败: {e}")
 
     async def subscribe(self, websocket) -> None:
-        """订阅公告频道"""
+        """订阅公告频道（websockets库）"""
         subscribe_message = {
             "command": "SUBSCRIBE",
             "value": "com_announcement_en"  # 使用正确的topic
@@ -274,11 +268,25 @@ class BinanceAnnouncementMonitor:
         await websocket.send(json.dumps(subscribe_message))
         response = await websocket.recv()
         logger.info(f"订阅响应: {response}")
+    
+    async def subscribe_aiohttp(self, websocket) -> None:
+        """订阅公告频道（aiohttp库）"""
+        subscribe_message = {
+            "command": "SUBSCRIBE",
+            "value": "com_announcement_en"  # 使用正确的topic
+        }
+        await websocket.send_str(json.dumps(subscribe_message))
+        logger.info("已发送订阅消息")
 
     async def setup_session(self):
         """设置aiohttp session"""
         if self.session is None:
-            self.session = aiohttp.ClientSession()
+            # 配置代理连接器
+            connector = aiohttp.TCPConnector()
+            self.session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=60)
+            )
     
     async def cleanup_session(self):
         """清理aiohttp session"""
@@ -300,32 +308,30 @@ class BinanceAnnouncementMonitor:
                     headers = {"X-MBX-APIKEY": self.api_key}
                     logger.info(f"尝试连接到: {url[:50]}...")  # 只显示URL前50个字符
                     
-                    async with websockets.connect(
-                        url, 
-                        extra_headers=headers,
-                        ping_interval=None,
-                        ping_timeout=self.ping_timeout
+                    # 使用aiohttp的WebSocket客户端支持代理
+                    async with self.session.ws_connect(
+                        url,
+                        headers=headers,
+                        proxy=HTTP_PROXY,
+                        heartbeat=self.ping_interval
                     ) as websocket:
                         logger.info("已连接到Binance WebSocket API")
                         
-                        # 启动PING任务
-                        ping_task = asyncio.create_task(self.ping_server(websocket))
-                        
                         # 订阅频道
-                        await self.subscribe(websocket)
+                        await self.subscribe_aiohttp(websocket)
                         
                         try:
-                            while True:
-                                message = await websocket.recv()
-                                await self.handle_message(json.loads(message))
+                            async for msg in websocket:
+                                if msg.type == aiohttp.WSMsgType.TEXT:
+                                    await self.handle_message(json.loads(msg.data))
+                                elif msg.type == aiohttp.WSMsgType.ERROR:
+                                    logger.error(f'WebSocket错误: {websocket.exception()}')
+                                    break
                         except Exception as e:
                             logger.error(f"接收消息时出错: {e}")
-                            if ping_task:
-                                ping_task.cancel()
                                 
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning("WebSocket连接已关闭，准备重连...")
-
+                except aiohttp.ClientConnectorError:
+                    logger.warning("WebSocket连接失败，准备重连...")
                 except Exception as e:
                     logger.error(f"发生错误: {e}", exc_info=True)  # 添加详细错误堆栈
                 

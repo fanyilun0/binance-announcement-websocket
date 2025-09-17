@@ -2,6 +2,7 @@ import aiohttp
 import asyncio
 from dotenv import load_dotenv
 import os
+from config import HTTP_PROXY
 
 # 加载环境变量
 load_dotenv()
@@ -91,7 +92,7 @@ async def send_message_async(message_content):
         print(f"消息将被分成 {total_segments} 段发送")
     
     headers = {'Content-Type': 'application/json'}
-    proxy =  None
+    proxy = HTTP_PROXY
     
     async with aiohttp.ClientSession() as session:
         for i, segment in enumerate(segments):
