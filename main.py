@@ -13,7 +13,6 @@ import websockets
 from dotenv import load_dotenv
 import aiohttp
 from webhook import send_message_async
-from ntfy import send_ntfy_notification
 
 # 加载环境变量
 load_dotenv()
@@ -30,8 +29,18 @@ class BinanceAnnouncementMonitor:
     def __init__(self):
         self.api_key = os.getenv('BINANCE_API_KEY')
         self.api_secret = os.getenv('BINANCE_SECRET_KEY')
-        if not self.api_key or not self.api_secret:
-            raise ValueError("请在.env文件中设置BINANCE_API_KEY和BINANCE_SECRET_KEY")
+        
+        # 增强的环境变量检查和日志
+        logger.info("正在初始化 BinanceAnnouncementMonitor...")
+        if not self.api_key:
+            logger.error("BINANCE_API_KEY 环境变量未设置")
+            raise ValueError("请在.env文件中设置BINANCE_API_KEY")
+        if not self.api_secret:
+            logger.error("BINANCE_SECRET_KEY 环境变量未设置")
+            raise ValueError("请在.env文件中设置BINANCE_SECRET_KEY")
+        
+        logger.info(f"API Key: {self.api_key[:8]}...")  # 只显示前8位用于调试
+        logger.info("API Secret 已设置")
         
         self.base_url = "wss://api.binance.com/sapi/wss"
         self.reconnect_delay = 5  # 重连延迟（秒）
@@ -282,12 +291,14 @@ class BinanceAnnouncementMonitor:
         try:
             # 设置aiohttp session
             await self.setup_session()
+            logger.info("开始连接到 Binance WebSocket API...")
             
             while True:
                 try:
                     # 准备连接URL和headers
                     url = self.get_connection_url()
                     headers = {"X-MBX-APIKEY": self.api_key}
+                    logger.info(f"尝试连接到: {url[:50]}...")  # 只显示URL前50个字符
                     
                     async with websockets.connect(
                         url, 
@@ -296,12 +307,6 @@ class BinanceAnnouncementMonitor:
                         ping_timeout=self.ping_timeout
                     ) as websocket:
                         logger.info("已连接到Binance WebSocket API")
-                        # 添加连接成功通知
-                        await send_ntfy_notification(
-                            "WebSocket连接成功",
-                            "已成功连接到Binance WebSocket API",
-                            tags=["success", "websocket"]
-                        )
                         
                         # 启动PING任务
                         ping_task = asyncio.create_task(self.ping_server(websocket))
@@ -320,22 +325,9 @@ class BinanceAnnouncementMonitor:
                                 
                 except websockets.exceptions.ConnectionClosed:
                     logger.warning("WebSocket连接已关闭，准备重连...")
-                    # 添加连接断开通知
-                    await send_ntfy_notification(
-                        "WebSocket连接断开",
-                        "WebSocket连接已断开，准备重新连接...",
-                        priority="high",
-                        tags=["warning", "websocket"]
-                    )
+
                 except Exception as e:
-                    logger.error(f"发生错误: {e}")
-                    # 添加错误通知
-                    await send_ntfy_notification(
-                        "WebSocket连接错误",
-                        f"发生错误: {e}",
-                        priority="high",
-                        tags=["error", "websocket"]
-                    )
+                    logger.error(f"发生错误: {e}", exc_info=True)  # 添加详细错误堆栈
                 
                 logger.info(f"{self.reconnect_delay}秒后尝试重连...")
                 await asyncio.sleep(self.reconnect_delay)
@@ -344,35 +336,54 @@ class BinanceAnnouncementMonitor:
             # 清理session
             await self.cleanup_session()
 
-    def run(self) -> None:
+    async def run(self) -> None:
         """启动监控"""
         try:
-            # 使用asyncio运行
-            asyncio.run(self.connect_and_listen())
+            await self.connect_and_listen()
         except KeyboardInterrupt:
             logger.info("程序已停止")
-            # 添加正常终止通知
-            asyncio.run(send_ntfy_notification(
-                "程序已停止",
-                "BinanceAnnouncementMonitor 程序已正常停止",
-                tags=["info", "shutdown"]
-            ))
         except Exception as e:
-            logger.error(f"程序运行出错: {e}")
-            # 添加异常终止通知
-            asyncio.run(send_ntfy_notification(
-                "程序异常终止",
-                f"BinanceAnnouncementMonitor 程序异常终止: {e}",
-                priority="urgent",
-                tags=["error", "shutdown"]
-            ))
+            logger.error(f"程序运行出错: {e}", exc_info=True)
+
+async def main():
+    """程序主入口"""
+    logger.info("========== BinanceAnnouncementMonitor 启动 ==========")
+    logger.info("正在初始化程序...")
+    
+    try:
+        # 检查环境变量
+        logger.info("检查环境变量...")
+        required_env_vars = ['BINANCE_API_KEY', 'BINANCE_SECRET_KEY']
+        optional_env_vars = ['WEBHOOK_URL', 'LOG_LEVEL']
+        
+        for env_var in required_env_vars:
+            if not os.getenv(env_var):
+                logger.error(f"必需的环境变量 {env_var} 未设置")
+                raise ValueError(f"请在.env文件中设置{env_var}")
+        
+        for env_var in optional_env_vars:
+            value = os.getenv(env_var)
+            if value:
+                if env_var in ['BINANCE_API_KEY', 'BINANCE_SECRET_KEY']:
+                    logger.info(f"{env_var}: {value[:8]}...")
+                else:
+                    logger.info(f"{env_var}: {value}")
+            else:
+                logger.warning(f"可选环境变量 {env_var} 未设置")
+        
+        logger.info("创建监控实例...")
+        monitor = BinanceAnnouncementMonitor()
+        
+        logger.info("开始运行监控...")
+        await monitor.run()
+        
+    except Exception as e:
+        logger.error(f"程序在主函数中遇到无法恢复的错误: {e}", exc_info=True)
+        # 发送启动失败通知（静默失败）
+        try:
+            await send_message_async("程序启动失败", f"程序启动时遇到严重错误: {e}")
+        except Exception as e:
+            logger.warning(f"发送启动失败通知失败: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(send_ntfy_notification("程序启动", "BinanceAnnouncementMonitor 程序启动成功"))
-
-    monitor = BinanceAnnouncementMonitor()
-    try:
-        monitor.run() 
-    except Exception as e:
-        logger.error(f"程序运行出错: {e}")
-        asyncio.run(send_ntfy_notification("程序运行出错", f"BinanceAnnouncementMonitor 程序运行出错: {e}"))
+    asyncio.run(main())
