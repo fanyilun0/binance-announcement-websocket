@@ -351,30 +351,7 @@ async def main():
     logger.info("正在初始化程序...")
     
     try:
-        # 检查环境变量
-        logger.info("检查环境变量...")
-        required_env_vars = ['BINANCE_API_KEY', 'BINANCE_SECRET_KEY']
-        optional_env_vars = ['WEBHOOK_URL', 'LOG_LEVEL']
-        
-        for env_var in required_env_vars:
-            if not os.getenv(env_var):
-                logger.error(f"必需的环境变量 {env_var} 未设置")
-                raise ValueError(f"请在.env文件中设置{env_var}")
-        
-        for env_var in optional_env_vars:
-            value = os.getenv(env_var)
-            if value:
-                if env_var in ['BINANCE_API_KEY', 'BINANCE_SECRET_KEY']:
-                    logger.info(f"{env_var}: {value[:8]}...")
-                else:
-                    logger.info(f"{env_var}: {value}")
-            else:
-                logger.warning(f"可选环境变量 {env_var} 未设置")
-        
-        logger.info("创建监控实例...")
         monitor = BinanceAnnouncementMonitor()
-        
-        logger.info("开始运行监控...")
         await monitor.run()
         
     except Exception as e:
