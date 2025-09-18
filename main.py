@@ -188,7 +188,7 @@ class BinanceAnnouncementMonitor:
                 logger.info(f"分类: {announcement.get('catalogName')}")
                 logger.info(f"标题: {announcement.get('title')}")
                 logger.info(f"发布时间: {announcement.get('publishDate')}")
-                logger.info(f"内容: {announcement.get('body').slice(0, 1000)}")
+                logger.info(f"内容: {announcement.get('body')}")
                 logger.info("-" * 50)
                 
                 # 保存公告到文件
@@ -250,7 +250,7 @@ class BinanceAnnouncementMonitor:
                 f"📌 分类: {announcement.get('catalogName', 'N/A')}\n"
                 f"📑 标题: {title}\n"
                 f"⏰ 时间: {announcement.get('publishDate', 'N/A')}\n"
-                f"📄 内容: {body}\n"
+                f"📄 内容: {body[:1000]}\n"
             )
             
             # 发送消息
