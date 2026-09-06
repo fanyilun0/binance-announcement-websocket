@@ -8,6 +8,7 @@
 - API密钥认证和签名验证
 - 自动心跳检测（30秒间隔）
 - 断线自动重连机制
+- 基于 SQLite 的持久化待发送队列：Webhook 暂时不可用或容器重启后会继续投递
 - 详细的日志记录
 - 防重复消息处理
 - 异常处理和错误恢复
@@ -37,6 +38,7 @@ pip install -r requirements.txt
 LOG_LEVEL=INFO
 BINANCE_API_KEY=你的API密钥
 BINANCE_SECRET_KEY=你的密钥
+WEBHOOK_URL=你的机器人Webhook地址
 ```
 
 ## 配置说明
@@ -48,6 +50,8 @@ BINANCE_SECRET_KEY=你的密钥
 | LOG_LEVEL | 日志级别 (DEBUG/INFO/WARNING/ERROR) | INFO | 否 |
 | BINANCE_API_KEY | 币安API Key | - | 是 |
 | BINANCE_SECRET_KEY | 币安Secret Key | - | 是 |
+| WEBHOOK_URL | 接收通知的机器人 Webhook 地址 | - | 是 |
+| STATE_DIR | 通知去重与待发送队列的持久化目录 | `state` | 否 |
 
 ### 程序参数
 
@@ -73,6 +77,7 @@ python main.py
    - 实时接收并显示新公告
    - 自动进行心跳检测
    - 在断线时自动重连
+   - 先持久化公告，再异步投递到 Webhook；失败会按 2、4、8…秒退避重试，最长间隔为 5 分钟
 
 ## 输出信息
 
@@ -110,10 +115,11 @@ python main.py
 2. 心跳超时：重新建立连接
 3. 消息处理错误：记录错误但不影响程序运行
 4. API认证失败：输出错误信息并退出
+5. Webhook 临时失败：公告保留在 `STATE_DIR/announcements.sqlite3`，容器重启后继续重试
 
 ## 开发计划
 
-- [ ] 添加数据持久化存储
+- [x] 添加数据持久化存储
 - [ ] 支持自定义通知方式（邮件、钉钉等）
 - [ ] 添加公告内容过滤功能
 - [ ] 支持多语言公告

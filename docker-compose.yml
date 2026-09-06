@@ -1,4 +1,3 @@
-version: '3.8'
 services:
   biance-wss-connection:
     build: 
@@ -13,15 +12,17 @@ services:
       - /app/.pytest_cache
       - /app/logs
       - /app/json
+      - ./state:/app/state
     environment:
       - TZ=Asia/Shanghai
       - ENV=dev
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
+      - STATE_DIR=/app/state
       - HTTP_PROXY=http://host.docker.internal:7890
       - HTTPS_PROXY=http://host.docker.internal:7890
     extra_hosts:
       - "host.docker.internal:host-gateway"
     shm_size: '0.5gb'
-    restart: "no"
-    command: python -m watchdog.watchmedo auto-restart --directory=/app --pattern=*.py --recursive -- python main.py
+    restart: "always"
+    command: python -u main.py

@@ -5,6 +5,7 @@ import os
 import uuid
 import hmac
 import hashlib
+from contextlib import suppress
 from datetime import datetime
 from typing import Dict, Any
 from urllib.parse import urlencode
@@ -13,6 +14,7 @@ import websockets
 from dotenv import load_dotenv
 import aiohttp
 from webhook import send_message_async
+from announcement_store import AnnouncementStore
 from config import HTTP_PROXY
 
 # 加载环境变量
@@ -45,7 +47,6 @@ class BinanceAnnouncementMonitor:
         
         self.base_url = "wss://api.binance.com/sapi/wss"
         self.reconnect_delay = 5  # 重连延迟（秒）
-        self.last_announcement_id = None
         self.ping_interval = 30  # PING间隔（秒）
         self.recv_window = 30000  # 接收窗口（毫秒）
         self.ping_timeout = 60  # PING超时时间（秒）
@@ -56,7 +57,9 @@ class BinanceAnnouncementMonitor:
         
         # 配置文件日志
         self.setup_logging()
-        self.session = None  # aiohttp session
+        state_dir = os.getenv('STATE_DIR', 'state')
+        self.store = AnnouncementStore(os.path.join(state_dir, 'announcements.sqlite3'))
+        self.delivery_wakeup = asyncio.Event()
         
     def setup_logging(self):
         """配置日志处理"""
@@ -147,7 +150,11 @@ class BinanceAnnouncementMonitor:
             # 清理公告内容
             body = self.clean_announcement_body(data.get('body', ''))
             
-            return {
+            announcement = {
+                # Binance currently does not guarantee that an article ID is present in
+                # every push payload, so retain it when available and use a fingerprint
+                # as a reliable fallback below.
+                'id': data.get('id') or data.get('articleId') or data.get('code'),
                 'catalogId': data.get('catalogId'),
                 'catalogName': data.get('catalogName'),
                 'publishDate': datetime.fromtimestamp(
@@ -156,9 +163,26 @@ class BinanceAnnouncementMonitor:
                 'title': data.get('title'),
                 'body': body
             }
+            announcement['announcementId'] = self.announcement_id(data, announcement)
+            return announcement
         except Exception as e:
             logger.error(f"解析公告数据失败: {e}")
             return {}
+
+    @staticmethod
+    def announcement_id(raw: Dict[str, Any], announcement: Dict[str, Any]) -> str:
+        """Return an announcement-level ID, never a category-level ``catalogId``."""
+        native_id = raw.get('id') or raw.get('articleId') or raw.get('code')
+        if native_id is not None:
+            return f"binance:{native_id}"
+
+        # catalogId identifies a category (e.g. "New Listings"), not an article.
+        # The tuple below remains stable across reconnects and process restarts.
+        identity = "\x1f".join(
+            str(value or '')
+            for value in (raw.get('publishDate'), announcement.get('catalogId'), announcement.get('title'))
+        )
+        return f"sha256:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
 
     async def handle_message(self, message: Dict[str, Any]) -> None:
         """处理接收到的消息"""
@@ -176,12 +200,10 @@ class BinanceAnnouncementMonitor:
                 if not announcement:
                     return
                 
-                # 避免重复处理相同的公告
-                announcement_id = announcement.get('catalogId')
-                if announcement_id == self.last_announcement_id:
+                announcement_id = announcement['announcementId']
+                if not self.store.add(announcement_id, announcement):
+                    logger.info("忽略重复公告：%s", announcement_id)
                     return
-                
-                self.last_announcement_id = announcement_id
                 
                 # 打印公告信息
                 logger.info("收到新公告:")
@@ -194,8 +216,9 @@ class BinanceAnnouncementMonitor:
                 # 保存公告到文件
                 self.save_announcement(announcement)
                 
-                # 发送到Webhook
-                await self.send_to_webhook(announcement)
+                # Webhook delivery happens in a separate retry worker.  Never block
+                # the WebSocket receive loop on a slow or unavailable webhook.
+                self.delivery_wakeup.set()
                 
         except Exception as e:
             logger.error(f"处理消息时出错: {e}")
@@ -235,29 +258,17 @@ class BinanceAnnouncementMonitor:
 
     async def send_to_webhook(self, announcement: Dict) -> None:
         """发送公告到Webhook"""
-        try:
-            if not self.session:
-                await self.setup_session()
-            
-            # 格式化消息内容
-            title = announcement.get('title', 'N/A')
-            body = announcement.get('body', 'N/A')
-            
-            body = self.clean_announcement_body(body)
-
-            content = (
-                f"📢 币安新公告\n"
-                f"📌 分类: {announcement.get('catalogName', 'N/A')}\n"
-                f"📑 标题: {title}\n"
-                f"⏰ 时间: {announcement.get('publishDate', 'N/A')}\n"
-                f"📄 内容: {body[:1000]}\n"
-            )
-            
-            # 发送消息
-            await send_message_async(content)
-            
-        except Exception as e:
-            logger.error(f"发送Webhook消息失败: {e}")
+        title = announcement.get('title', 'N/A')
+        body = self.clean_announcement_body(announcement.get('body', 'N/A'))
+        content = (
+            f"📢 币安新公告\n"
+            f"📌 分类: {announcement.get('catalogName', 'N/A')}\n"
+            f"📑 标题: {title}\n"
+            f"⏰ 时间: {announcement.get('publishDate', 'N/A')}\n"
+            f"📄 内容: {body[:1000]}\n"
+        )
+        if not await send_message_async(content):
+            raise RuntimeError("webhook did not accept the message")
 
     async def subscribe(self, websocket) -> None:
         """订阅公告频道（websockets库）"""
@@ -278,29 +289,33 @@ class BinanceAnnouncementMonitor:
         await websocket.send_str(json.dumps(subscribe_message))
         logger.info("已发送订阅消息")
 
-    async def setup_session(self):
-        """设置aiohttp session"""
-        if self.session is None:
-            # 配置代理连接器
-            connector = aiohttp.TCPConnector()
-            self.session = aiohttp.ClientSession(
-                connector=connector,
-                timeout=aiohttp.ClientTimeout(total=60)
-            )
-    
-    async def cleanup_session(self):
-        """清理aiohttp session"""
-        if self.session:
-            await self.session.close()
-            self.session = None
+    async def delivery_worker(self) -> None:
+        """Deliver the durable outbox with retries, independently of WebSocket I/O."""
+        while True:
+            pending = self.store.due()
+            if not pending:
+                self.delivery_wakeup.clear()
+                try:
+                    await asyncio.wait_for(self.delivery_wakeup.wait(), timeout=1)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            for item in pending:
+                try:
+                    await self.send_to_webhook(item['announcement'])
+                except Exception as exc:
+                    delay = self.store.mark_failed(item['announcement_id'], item['attempts'] + 1, str(exc))
+                    logger.warning("Webhook 投递失败，%s 秒后重试：%s", delay, exc)
+                else:
+                    self.store.mark_sent(item['announcement_id'])
+                    logger.info("公告已投递：%s", item['announcement_id'])
 
     async def connect_and_listen(self) -> None:
         """建立连接并监听消息"""
-        try:
-            # 设置aiohttp session
-            await self.setup_session()
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=20)
+        async with aiohttp.ClientSession(timeout=timeout) as ws_session:
             logger.info("开始连接到 Binance WebSocket API...")
-            
             while True:
                 try:
                     # 准备连接URL和headers
@@ -309,7 +324,7 @@ class BinanceAnnouncementMonitor:
                     logger.info(f"尝试连接到: {url[:50]}...")  # 只显示URL前50个字符
                     
                     # 使用aiohttp的WebSocket客户端支持代理
-                    async with self.session.ws_connect(
+                    async with ws_session.ws_connect(
                         url,
                         headers=headers,
                         proxy=HTTP_PROXY,
@@ -327,6 +342,7 @@ class BinanceAnnouncementMonitor:
                                 elif msg.type == aiohttp.WSMsgType.ERROR:
                                     logger.error(f'WebSocket错误: {websocket.exception()}')
                                     break
+                            logger.warning("WebSocket 连接已关闭，准备重连")
                         except Exception as e:
                             logger.error(f"接收消息时出错: {e}")
                                 
@@ -338,18 +354,20 @@ class BinanceAnnouncementMonitor:
                 logger.info(f"{self.reconnect_delay}秒后尝试重连...")
                 await asyncio.sleep(self.reconnect_delay)
                 
-        finally:
-            # 清理session
-            await self.cleanup_session()
-
     async def run(self) -> None:
         """启动监控"""
+        delivery_task = asyncio.create_task(self.delivery_worker())
         try:
             await self.connect_and_listen()
         except KeyboardInterrupt:
             logger.info("程序已停止")
         except Exception as e:
             logger.error(f"程序运行出错: {e}", exc_info=True)
+        finally:
+            delivery_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await delivery_task
+            self.store.close()
 
 async def main():
     """程序主入口"""
@@ -364,7 +382,7 @@ async def main():
         logger.error(f"程序在主函数中遇到无法恢复的错误: {e}", exc_info=True)
         # 发送启动失败通知（静默失败）
         try:
-            await send_message_async("程序启动失败", f"程序启动时遇到严重错误: {e}")
+            await send_message_async(f"程序启动失败：{e}")
         except Exception as e:
             logger.warning(f"发送启动失败通知失败: {e}")
 

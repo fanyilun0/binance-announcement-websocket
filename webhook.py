@@ -1,12 +1,15 @@
-import aiohttp
 import asyncio
-from dotenv import load_dotenv
+import logging
 import os
+
+import aiohttp
+from dotenv import load_dotenv
 from config import HTTP_PROXY
 
 # 加载环境变量
 load_dotenv()
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+logger = logging.getLogger(__name__)
 
 async def _send_single_message(session, content, headers, proxy):
     """发送单条消息"""
@@ -19,14 +22,13 @@ async def _send_single_message(session, content, headers, proxy):
     
     try:
         async with session.post(WEBHOOK_URL, json=payload, headers=headers, proxy=proxy) as response:
-            if response.status == 200:
-                print(f"消息片段发送成功! (长度: {len(content)})")
+            if 200 <= response.status < 300:
+                logger.info("Webhook 消息片段发送成功（长度：%s）", len(content))
                 return True
-            else:
-                print(f"消息片段发送失败: {response.status}, {await response.text()}")
-                return False
+            logger.warning("Webhook 消息片段发送失败：HTTP %s，%s", response.status, await response.text())
+            return False
     except Exception as e:
-        print(f"消息片段发送出错: {str(e)}")
+        logger.warning("Webhook 消息片段发送出错：%s", e)
         return False
 
 def split_message(message, max_length=1000):
@@ -84,30 +86,36 @@ async def send_message_async(message_content):
     Args:
         message_content (str): 要发送的消息内容
     """
+    if not WEBHOOK_URL:
+        logger.error("WEBHOOK_URL 环境变量未设置，公告将保留在待发送队列中")
+        return False
+
     # 分割消息
     segments = split_message(message_content)
     total_segments = len(segments)
     
     if total_segments > 1:
-        print(f"消息将被分成 {total_segments} 段发送")
+        logger.info("消息将被分成 %s 段发送", total_segments)
     
     headers = {'Content-Type': 'application/json'}
     proxy = HTTP_PROXY
     
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         for i, segment in enumerate(segments):
             # 发送消息片段
             success = await _send_single_message(session, segment, headers, proxy)
             
             if not success:
-                print(f"第 {i+1}/{total_segments} 段消息发送失败")
-                return
+                logger.warning("第 %s/%s 段消息发送失败", i + 1, total_segments)
+                return False
             
             # 如果不是最后一段，等待一小段时间以避免触发频率限制
             if i < total_segments - 1:
                 await asyncio.sleep(0.5)  # 500ms 延迟
     
     if total_segments > 1:
-        print(f"所有 {total_segments} 段消息发送完成")
+        logger.info("所有 %s 段消息发送完成", total_segments)
     else:
-        print("消息发送成功!")
+        logger.info("Webhook 消息发送成功")
+    return True
